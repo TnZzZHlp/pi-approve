@@ -1,0 +1,23 @@
+{
+  "name": "pi-approve",
+  "version": "0.1.0",
+  "type": "module",
+  "keywords": ["pi-package"],
+  "files": ["src"],
+  "pi": { "extensions": ["./src/index.ts"] },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test:e2e": "tsx e2e/approval.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "typescript": "^5.9.0",
+    "tsx": "^4.20.0"
+  },
+  "engines": { "node": ">=22.19.0" }
+}
