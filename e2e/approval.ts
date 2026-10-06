@@ -293,7 +293,27 @@ try {
   await pi.run([bash(flagFull)]);
   assert.equal(await readFile(flagFull, "utf8"), "approved");
   assert.equal(mock.reviews.length, flagBefore);
-  assert.equal(JSON.parse(await readFile(join(agentDir, "approval.json"), "utf8")).mode, "auto");
+  const configPath = join(agentDir, "approval.json");
+  assert.equal(JSON.parse(await readFile(configPath, "utf8")).mode, "auto");
+
+  pi.confirm(false);
+  let beforeFullConfirm = confirms(pi.events).length;
+  await pi.command("/permissions full");
+  assert.equal(confirms(pi.events).length, beforeFullConfirm + 1);
+  assert.equal(JSON.parse(await readFile(configPath, "utf8")).mode, "auto");
+
+  pi.confirm(true);
+  beforeFullConfirm = confirms(pi.events).length;
+  await pi.command("/permissions full");
+  assert.equal(confirms(pi.events).length, beforeFullConfirm + 1);
+  assert.equal(JSON.parse(await readFile(configPath, "utf8")).mode, "full");
+
+  pi.confirm(false);
+  beforeFullConfirm = confirms(pi.events).length;
+  await pi.command("/permissions full");
+  assert.equal(confirms(pi.events).length, beforeFullConfirm, "saved full mode is a no-op and does not ask again");
+  assert.equal(JSON.parse(await readFile(configPath, "utf8")).mode, "full");
+
   await pi.command("/permissions ask");
   assert.equal(JSON.parse(await readFile(join(agentDir, "approval.json"), "utf8")).mode, "ask");
 

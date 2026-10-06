@@ -123,6 +123,35 @@ try {
   pi = undefined;
 
   await writeFile(configPath, configText("ask"));
+  const beforeChildModeChangeConfig = await readFile(configPath, "utf8");
+  const rootAskSnapshot = JSON.stringify({
+    version: 1, mode: "ask", reviewer: "e2e/reviewer", publisher: "00000000-0000-4000-8000-000000000002",
+  });
+  pi = startPi(workspace, agentDir, ["-e", probeExtension], {
+    [SUBAGENT_CHILD_ENV]: "1",
+    [APPROVAL_INHERITANCE_ENV]: rootAskSnapshot,
+  });
+  await pi.request("get_state");
+  await pi.command("/permissions auto");
+  assert.equal(await readFile(configPath, "utf8"), beforeChildModeChangeConfig,
+    "inherited child mode changes must not write shared config");
+  const afterModeChangeTarget = join(workspace, "descendant-keeps-root-ask");
+  const beforeChildModeChangeReviews = mock.reviews.length;
+  const childModeChangeRun = await pi.run([{
+    name: "inheritance-probe", arguments: { depth: 0, path: afterModeChangeTarget },
+  }]);
+  const nestedProcess = JSON.parse(await latestToolText(pi));
+  assert.equal(nestedProcess.status, 0, `nested child should exit successfully: ${JSON.stringify(nestedProcess)}`);
+  assert(await missing(afterModeChangeTarget), "descendant must retain the root ask snapshot after its parent child switches to auto");
+  assert.equal(mock.reviews.length - beforeChildModeChangeReviews, 1,
+    "only the inherited auto child tool should call the reviewer; ask-mode descendant must remain blocked");
+  assert.equal(childModeChangeRun.filter(event => event.type === "extension_ui_request" && event.method === "confirm").length, 0);
+  assert.equal(await readFile(configPath, "utf8"), beforeChildModeChangeConfig,
+    "local inherited mode changes and descendant startup must not persist shared config");
+  await pi.stop();
+  pi = undefined;
+
+  await writeFile(configPath, configText("ask"));
   const straySnapshot = JSON.stringify({
     version: 1, mode: "full", publisher: "00000000-0000-4000-8000-000000000001",
   });

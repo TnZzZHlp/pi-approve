@@ -105,6 +105,7 @@ export class ApprovalController {
   }
 
   private publishInheritance() {
+    if (this.inheritance.kind !== "root") return;
     this.publishedInheritance = publishApprovalInheritance(
       this.mode, this.override(), Boolean(this.error),
     );
@@ -163,7 +164,10 @@ export class ApprovalController {
       ctx.ui.notify(`请修复审批配置并 /reload：${displayText(this.error)}`, "error");
       return;
     }
-    if (mode === "full" && mode !== this.mode && !(await confirmFull(ctx))) return;
+    const needsFullConfirmation = mode === "full" && (
+      mode !== this.mode || (this.inheritance.kind === "root" && this.config.mode !== "full")
+    );
+    if (needsFullConfirmation && !(await confirmFull(ctx))) return;
     if (mode === "auto") {
       try { resolveReviewer(ctx, this.config, this.override()); }
       catch (error) {
