@@ -150,7 +150,7 @@ export class ApprovalController {
     this.mode = mode;
     this.pi.appendEntry(STATE, { mode });
     status(ctx, mode);
-    ctx.ui.notify(`Permissions: ${MODE_LABELS[mode]}（工具级门禁）`, "info");
+    ctx.ui.notify(`Permissions: ${MODE_LABELS[mode]}`, "info");
   }
 
   private async configureReviewer(ref: string, ctx: ExtensionContext): Promise<boolean> {

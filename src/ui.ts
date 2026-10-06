@@ -6,7 +6,7 @@ export function displayText(text: string) {
     "\\u" + char.charCodeAt(0).toString(16).padStart(4, "0"));
 }
 export function status(ctx: ExtensionContext, mode: ApprovalMode, reviewing = false) {
-  const text = `Permissions: ${MODE_LABELS[mode]}${reviewing ? " | Reviewing..." : ""}`;
+  const text = `${MODE_LABELS[mode]}${reviewing ? " | Reviewing..." : ""}`;
   ctx.ui.setStatus("pi-approve", ctx.mode === "tui"
     ? ctx.ui.theme.fg(mode === "full" ? "warning" : "accent", text)
     : text);
@@ -14,7 +14,7 @@ export function status(ctx: ExtensionContext, mode: ApprovalMode, reviewing = fa
 export async function selectMode(ctx: ExtensionContext, current: ApprovalMode) {
   if (!ctx.hasUI) return undefined;
   const labels = MODES.map(mode => `${mode === current ? "[active] " : ""}${MODE_LABELS[mode]}`);
-  const choice = await ctx.ui.select("Permissions（工具级门禁，无系统沙箱）", labels);
+  const choice = await ctx.ui.select("Permissions", labels);
   const index = labels.indexOf(choice ?? "");
   return index < 0 ? undefined : MODES[index];
 }
