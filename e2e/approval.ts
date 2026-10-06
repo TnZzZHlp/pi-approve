@@ -6,7 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { startMock } from "./mock-server.ts";
-import { startPi } from "./rpc-client.ts";
+import { piEnvironment, startPi } from "./rpc-client.ts";
 
 const temp = await mkdtemp(join(tmpdir(), "pi-approve-e2e-"));
 const workspace = join(temp, "workspace");
@@ -109,11 +109,13 @@ try {
   const stillAsk = await pi.run([bash(join(workspace, "missing-reviewer"))]);
   assert.equal(confirms(stillAsk).length, 1);
   assert.equal(mock.reviews.length, beforeMissing);
+  assert(await missing(join(agentDir, "approval.json")));
 
   pi.input("e2e/reviewer");
   await pi.command("/permissions auto");
   const config = JSON.parse(await readFile(join(agentDir, "approval.json"), "utf8"));
   assert.equal(config.reviewers.e2e, "e2e/reviewer");
+  assert.equal(config.mode, "auto");
   const autoFile = join(workspace, "auto");
   const autoRun = await pi.run([bash(autoFile)]);
   assert.equal(confirms(autoRun).length, 0);
@@ -129,7 +131,9 @@ try {
   mock.denyTool("read");
   const beforeHardlinkReview = mock.reviews.length;
   const autoHardlinkRead = await pi.run([{ name: "read", arguments: { path: workspaceHardlink } }]);
-  assert.equal(confirms(autoHardlinkRead).length, 0);
+  assert.equal(confirms(autoHardlinkRead).length, 1);
+  assert(confirms(autoHardlinkRead)[0].message.includes("mock reviewer decision"));
+  assert(confirms(autoHardlinkRead)[0].message.includes(workspaceHardlink));
   assert.equal(mock.reviews.length, beforeHardlinkReview + 1);
   const reviewerMessage = mock.reviews.at(-1)!.body.messages.at(-1);
   const reviewerText = typeof reviewerMessage.content === "string" ? reviewerMessage.content :
@@ -164,8 +168,46 @@ try {
 
   mock.setBehavior("deny");
   const denied = join(workspace, "auto-denied");
-  await pi.run([bash(denied)]);
+  assert.equal(confirms(await pi.run([bash(denied)])).length, 1);
   assert(await missing(denied));
+  const deniedRecord = (await pi.request("get_entries")).data.entries
+    .filter((entry: any) => entry.customType === "pi-approve:review").at(-1).data;
+  assert.equal(deniedRecord.decision, "deny");
+  assert.equal(deniedRecord.reviewerDecision, "deny");
+  assert.equal(deniedRecord.humanDecision, "deny");
+
+  pi.confirm(true);
+  const overridden = join(workspace, "human-overridden");
+  const beforeOverride = mock.reviews.length;
+  const overrideRun = await pi.run([bash(overridden)]);
+  assert.equal(confirms(overrideRun).length, 1);
+  assert.equal(mock.reviews.length, beforeOverride + 1);
+  assert(confirms(overrideRun)[0].message.includes(bash(overridden).arguments.command));
+  assert(confirms(overrideRun)[0].message.includes(workspace));
+  assert.equal(await readFile(overridden, "utf8"), "approved");
+  const overrideRecord = (await pi.request("get_entries")).data.entries
+    .filter((entry: any) => entry.customType === "pi-approve:review").at(-1).data;
+  assert.equal(overrideRecord.decision, "allow");
+  assert.equal(overrideRecord.reviewerDecision, "deny");
+  assert.equal(overrideRecord.humanDecision, "allow");
+  assert.equal(overrideRecord.reviewer, "e2e/reviewer");
+  assert(overrideRecord.reason.includes("mock reviewer decision"));
+  const overrideMessages = (await pi.request("get_messages")).data.messages;
+  assert.equal(overrideMessages.filter((message: any) => message.role === "toolResult").at(-1).usage.totalTokens, 20);
+  assert.equal(JSON.parse(await readFile(join(agentDir, "approval.json"), "utf8")).mode, "auto");
+
+  pi.confirm(undefined);
+  const cancelledOverride = join(workspace, "cancelled-human-override");
+  const beforeHumanConfirm = confirms(pi.events).length;
+  const waitingForHuman = pi.run([bash(cancelledOverride)]);
+  for (let i = 0; i < 250 && confirms(pi.events).length === beforeHumanConfirm; i++) await delay(20);
+  assert.equal(confirms(pi.events).length, beforeHumanConfirm + 1);
+  await pi.command("/permissions ask");
+  await waitingForHuman;
+  assert(await missing(cancelledOverride));
+  pi.confirm(false);
+  await pi.command("/permissions auto");
+
   const beforeBreaker = mock.reviews.length;
   await pi.run([bash(denied)], true);
   assert.equal(mock.reviews.length - beforeBreaker, 3);
@@ -173,14 +215,15 @@ try {
 
   mock.setBehavior("malformed");
   const malformed = join(workspace, "malformed");
-  await pi.run([bash(malformed)]);
+  assert.equal(confirms(await pi.run([bash(malformed)])).length, 0);
   assert(await missing(malformed));
   mock.setBehavior("tool-call");
-  await pi.run([bash(malformed)]);
+  assert.equal(confirms(await pi.run([bash(malformed)])).length, 0);
   assert(await missing(malformed));
 
   pi.confirm(false);
   await pi.command("/permissions full");
+  assert.equal(JSON.parse(await readFile(join(agentDir, "approval.json"), "utf8")).mode, "auto");
   const fullDenied = join(workspace, "full-denied");
   const beforeFullDenied = mock.reviews.length;
   await pi.run([bash(fullDenied)]);
@@ -194,14 +237,32 @@ try {
   assert.equal(mock.reviews.length, beforeFull);
   assert.equal(await readFile(full, "utf8"), "approved");
 
-  await pi.request("new_session");
-  pi.confirm(false);
-  const fresh = join(workspace, "fresh-session");
-  assert.equal(confirms(await pi.run([bash(fresh)])).length, 1);
-  assert(await missing(fresh));
-  pi.confirm(true);
   mock.setBehavior("allow");
-  await pi.command("/permissions auto");
+  for (const mode of ["full", "ask", "auto"] as const) {
+    await pi.command(`/permissions ${mode}`);
+    const saved = JSON.parse(await readFile(join(agentDir, "approval.json"), "utf8"));
+    assert.equal(saved.mode, mode);
+    assert.equal(saved.reviewers.e2e, "e2e/reviewer");
+    assert.equal(saved.timeoutMs, 90_000);
+    for (const restart of [false, true]) {
+      if (restart) {
+        await pi.stop();
+        pi = startPi(workspace, agentDir);
+        await pi.request("get_state");
+        assert.equal(confirms(pi.events).length, 0);
+      } else {
+        await pi.request("new_session");
+      }
+      pi.confirm(false);
+      const fresh = join(workspace, `${mode}-${restart ? "restart" : "new-session"}`);
+      const beforeFresh = mock.reviews.length;
+      assert.equal(confirms(await pi.run([bash(fresh)])).length, mode === "ask" ? 1 : 0);
+      assert.equal(mock.reviews.length - beforeFresh, mode === "auto" ? 1 : 0);
+      if (mode === "ask") assert(await missing(fresh));
+      else assert.equal(await readFile(fresh, "utf8"), "approved");
+    }
+  }
+  pi.confirm(true);
   await pi.request("set_model", { provider: "openai-codex", modelId: "gpt-5.4" });
   const codex = join(workspace, "codex");
   await pi.run([bash(codex)]);
@@ -219,6 +280,7 @@ try {
   const timeoutRun = await pi.run([bash(timeout)]);
   assert(await missing(timeout));
   assert(timeoutRun.some(event => event.method === "notify" && event.message.includes("审批超时")));
+  assert.equal(confirms(timeoutRun).length, 0);
 
   mock.setBehavior("allow");
   pi = await (async () => {
@@ -231,27 +293,35 @@ try {
   await pi.run([bash(flagFull)]);
   assert.equal(await readFile(flagFull, "utf8"), "approved");
   assert.equal(mock.reviews.length, flagBefore);
+  assert.equal(JSON.parse(await readFile(join(agentDir, "approval.json"), "utf8")).mode, "auto");
+  await pi.command("/permissions ask");
+  assert.equal(JSON.parse(await readFile(join(agentDir, "approval.json"), "utf8")).mode, "ask");
 
   await pi.stop();
-  const printFile = join(workspace, "no-ui");
-  await new Promise<void>((resolve, reject) => {
-    const child = execFile("pi", [
-    "--print", "--offline", "--no-extensions", "--no-skills", "--no-context-files",
-    "--no-prompt-templates", "--no-themes", "--no-session", "--model", "e2e/main",
-    "-e", fileURLToPath(new URL("../src/index.ts", import.meta.url)),
-    JSON.stringify({ calls: [bash(printFile)] }),
-    ], { cwd: workspace, env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1" }, timeout: 15000 },
-    error => error ? reject(error) : resolve());
-    child.stdin?.end();
-  });
-  assert(await missing(printFile));
+  mock.setBehavior("deny");
+  for (const mode of ["ask", "auto"]) {
+    const printFile = join(workspace, `no-ui-${mode}`);
+    const beforePrint = mock.reviews.length;
+    await new Promise<void>((resolve, reject) => {
+      const child = execFile("pi", [
+        "--print", "--offline", "--no-extensions", "--no-skills", "--no-context-files",
+        "--no-prompt-templates", "--no-themes", "--no-session", "--model", "e2e/main",
+        "-e", fileURLToPath(new URL("../src/index.ts", import.meta.url)), "--approval-mode", mode,
+        JSON.stringify({ calls: [bash(printFile)] }),
+      ], { cwd: workspace, env: piEnvironment(agentDir), timeout: 15000 },
+      error => error ? reject(error) : resolve());
+      child.stdin?.end();
+    });
+    assert(await missing(printFile));
+    assert.equal(mock.reviews.length - beforePrint, mode === "auto" ? 1 : 0);
+  }
   await writeFile(join(agentDir, "approval.json"), "invalid JSON");
   pi = startPi(workspace, agentDir);
   await pi.request("get_state");
   const broken = join(workspace, "broken-config");
   await pi.run([{ name: "write", arguments: { path: broken, content: "must not execute" } }]);
   assert(await missing(broken));
-  console.log("E2E passed: manual/auto/full, configuration, protected paths, symlinks, strict output, nested calls, usage, cancellation, new sessions, circuit breaker, timeout, Codex dedicated reviewer, headless mode and fail-closed startup.");
+  console.log("E2E passed: manual/auto/full, configuration, protected paths, symlinks, strict output, nested calls, usage, cancellation, human denial override, persisted permissions, new sessions, restarts, circuit breaker, timeout, Codex dedicated reviewer, headless mode and fail-closed startup.");
 } finally {
   await pi.stop();
   await mock.close();

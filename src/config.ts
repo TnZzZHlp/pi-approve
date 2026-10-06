@@ -2,7 +2,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { ApprovalConfig } from "./types.ts";
+import { isMode, type ApprovalConfig } from "./types.ts";
 
 export function configPath() {
   return join(getAgentDir(), "approval.json");
@@ -11,6 +11,7 @@ export async function loadConfig(): Promise<ApprovalConfig> {
   try {
     const raw = JSON.parse(await readFile(configPath(), "utf8"));
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Expected an object");
+    if (raw.mode !== undefined && !isMode(raw.mode)) throw new Error("mode must be ask, auto or full");
     const reviewers: Record<string, string> = Object.create(null);
     if (raw.reviewers !== undefined) {
       if (!raw.reviewers || typeof raw.reviewers !== "object" || Array.isArray(raw.reviewers)) {
@@ -25,7 +26,7 @@ export async function loadConfig(): Promise<ApprovalConfig> {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 300_000) {
       throw new Error("timeoutMs must be between 1000 and 300000");
     }
-    return { reviewers, timeoutMs };
+    return { mode: raw.mode, reviewers, timeoutMs };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return { reviewers: Object.create(null), timeoutMs: 90_000 };

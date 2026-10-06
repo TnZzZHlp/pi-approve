@@ -11,6 +11,7 @@ export function isMode(value: unknown): value is ApprovalMode {
   return MODES.includes(value as ApprovalMode);
 }
 export interface ApprovalConfig {
+  mode?: ApprovalMode;
   reviewers: Record<string, string>;
   timeoutMs: number;
 }
@@ -21,6 +22,8 @@ export interface ReviewResult {
   decision: "allow" | "deny" | "unavailable";
   reason: string;
   reviewer?: string;
+  reviewerDecision?: "deny";
+  humanDecision?: "allow" | "deny";
   usage?: Usage;
 }
 export interface ApprovalRecord extends ReviewResult {

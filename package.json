@@ -7,7 +7,7 @@
   "pi": { "extensions": ["./src/index.ts"] },
   "scripts": {
     "check": "tsc --noEmit",
-    "test:e2e": "tsx e2e/approval.ts"
+    "test:e2e": "tsx e2e/approval.ts && tsx e2e/inheritance.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

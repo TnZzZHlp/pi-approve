@@ -2,18 +2,30 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
+import { APPROVAL_INHERITANCE_ENV, SUBAGENT_CHILD_ENV } from "../src/inheritance.ts";
 
-export function startPi(cwd: string, agentDir: string, flags: string[] = []) {
+export function piEnvironment(agentDir: string, overrides: NodeJS.ProcessEnv = {}) {
+  const env = { ...process.env };
+  delete env[APPROVAL_INHERITANCE_ENV];
+  delete env[SUBAGENT_CHILD_ENV];
+  Object.assign(env, overrides);
+  env.PI_CODING_AGENT_DIR = agentDir;
+  env.PI_OFFLINE = "1";
+  return env;
+}
+
+export function startPi(
+  cwd: string, agentDir: string, flags: string[] = [], envOverrides: NodeJS.ProcessEnv = {},
+) {
   const child = spawn("pi", [
     "--mode", "rpc", "--offline", "--no-extensions", "--no-skills", "--no-context-files",
     "--no-prompt-templates", "--no-themes", "--no-session",
     "-e", fileURLToPath(new URL("../src/index.ts", import.meta.url)),
     "--model", "e2e/main", "--thinking", "off", ...flags,
-  ], { cwd, env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1" },
-    stdio: ["pipe", "pipe", "pipe"] });
+  ], { cwd, env: piEnvironment(agentDir, envOverrides), stdio: ["pipe", "pipe", "pipe"] });
   const events: any[] = [];
   let stderr = "";
-  let confirm = true;
+  let confirm: boolean | undefined = true;
   let input: string | undefined;
   let selection: string | undefined;
   const pending = new Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
@@ -34,7 +46,7 @@ export function startPi(cwd: string, agentDir: string, flags: string[] = []) {
       }
     }
     if (event.type === "extension_ui_request") {
-      if (event.method === "confirm") send({ type: "extension_ui_response", id: event.id, confirmed: confirm });
+      if (event.method === "confirm" && confirm !== undefined) send({ type: "extension_ui_response", id: event.id, confirmed: confirm });
       if (event.method === "select") send({ type: "extension_ui_response", id: event.id,
         ...(selection ? { value: event.options.find((item: string) => item.includes(selection!)) } : { cancelled: true }) });
       if (event.method === "input") send({ type: "extension_ui_response", id: event.id,
@@ -72,7 +84,7 @@ export function startPi(cwd: string, agentDir: string, flags: string[] = []) {
   }
   return {
     events, request, run,
-    confirm(value: boolean) { confirm = value; },
+    confirm(value: boolean | undefined) { confirm = value; },
     input(value: string | undefined) { input = value; },
     select(value: string | undefined) { selection = value; },
     command(message: string) { return request("prompt", { message }); },

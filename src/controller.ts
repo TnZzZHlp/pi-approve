@@ -5,9 +5,10 @@ import { Key } from "@earendil-works/pi-tui";
 import { boundaryReason } from "./boundary.ts";
 import { configPath, loadConfig, saveConfig, validModelRef } from "./config.ts";
 import { DENIAL_GUIDANCE } from "./policy.ts";
+import { APPROVAL_INHERITANCE_ENV, captureApprovalInheritance, publishApprovalInheritance, restorePublishedApprovalInheritance, type ApprovalInheritance } from "./inheritance.ts";
 import { resolveReviewer, review } from "./reviewer.ts";
 import { isMode, MODES, MODE_LABELS, type ApprovalConfig, type ApprovalMode, type ApprovalRecord, type ReviewResult } from "./types.ts";
-import { confirmFull, displayText, selectMode, status } from "./ui.ts";
+import { confirmDenied, confirmFull, displayText, selectMode, status } from "./ui.ts";
 
 const STATE = "pi-approve:state";
 const AUDIT = "pi-approve:review";
@@ -38,6 +39,9 @@ export class ApprovalController {
   private denials: boolean[] = [];
   private consecutive = 0;
   private tripped = false;
+  private readonly inheritance: ApprovalInheritance = captureApprovalInheritance();
+  private readonly previousInheritance = process.env[APPROVAL_INHERITANCE_ENV];
+  private publishedInheritance?: string;
 
   constructor(private pi: ExtensionAPI) {}
 
@@ -57,7 +61,11 @@ export class ApprovalController {
     });
     this.pi.on("session_start", (_event, ctx) => this.restore(ctx));
     this.pi.on("session_tree", (_event, ctx) => this.restore(ctx));
-    this.pi.on("session_shutdown", () => { this.invalidate(); });
+    this.pi.on("session_shutdown", () => {
+      this.invalidate();
+      restorePublishedApprovalInheritance(this.publishedInheritance, this.previousInheritance);
+      this.publishedInheritance = undefined;
+    });
     this.pi.on("before_agent_start", event => {
       this.invalidate();
       this.denials = [];
@@ -90,8 +98,16 @@ export class ApprovalController {
   }
 
   private override() {
+    if (this.inheritance.kind === "inherited") return this.inheritance.snapshot.reviewer;
+    if (this.inheritance.kind === "invalid") return undefined;
     const value = this.pi.getFlag("approval-reviewer");
     return typeof value === "string" ? value : undefined;
+  }
+
+  private publishInheritance() {
+    this.publishedInheritance = publishApprovalInheritance(
+      this.mode, this.override(), Boolean(this.error),
+    );
   }
 
   private async restore(ctx: ExtensionContext) {
@@ -103,11 +119,12 @@ export class ApprovalController {
     this.consecutive = 0;
     this.tripped = false;
     this.error = "";
+    let sessionMode: ApprovalMode | undefined;
     const branch = ctx.sessionManager.getBranch();
     for (const entry of branch) {
       if (entry.type !== "custom" || !entry.data || typeof entry.data !== "object") continue;
       const data = entry.data as Record<string, unknown>;
-      if (entry.customType === STATE && isMode(data.mode)) this.mode = data.mode;
+      if (entry.customType === STATE && isMode(data.mode)) sessionMode = data.mode;
       if (entry.customType === AUDIT && typeof data.reason === "string" && typeof data.tool === "string") {
         this.records.push(entry.data as ApprovalRecord);
       }
@@ -115,28 +132,38 @@ export class ApprovalController {
     this.records = this.records.slice(-10);
     try {
       this.config = await loadConfig();
-      const flag = this.pi.getFlag("approval-mode");
-      if (flag !== undefined) {
-        if (!isMode(flag)) throw new Error("--approval-mode 必须是 ask、auto 或 full。");
-        this.mode = flag;
+      if (this.inheritance.kind === "inherited") {
+        this.mode = this.inheritance.snapshot.mode;
+        if (this.inheritance.snapshot.blocked) throw new Error("父代理审批配置不可用，子代理工具默认拦截。");
+      } else if (this.inheritance.kind === "invalid") {
+        this.mode = "ask";
+        throw new Error(this.inheritance.reason);
+      } else {
+        this.mode = sessionMode ?? this.config.mode ?? "ask";
+        const flag = this.pi.getFlag("approval-mode");
+        if (flag !== undefined) {
+          if (!isMode(flag)) throw new Error("--approval-mode 必须是 ask、auto 或 full。");
+          this.mode = flag;
+        }
+        const reviewer = this.override();
+        if (reviewer !== undefined && !validModelRef(reviewer)) throw new Error("--approval-reviewer 必须是 provider/model-id。");
       }
-      const reviewer = this.override();
-      if (reviewer !== undefined && !validModelRef(reviewer)) throw new Error("--approval-reviewer 必须是 provider/model-id。");
     } catch (error) {
       this.mode = "ask";
       this.error = error instanceof Error ? error.message : String(error);
       ctx.ui.notify(`审批配置错误，工具将默认拦截：${displayText(this.error)}`, "error");
     }
+    this.publishInheritance();
     status(ctx, this.mode);
   }
 
   private async setMode(mode: ApprovalMode, ctx: ExtensionContext) {
-    if (mode === this.mode) return;
+    if (mode === this.mode && (this.inheritance.kind !== "root" || mode === this.config.mode)) return;
     if (this.error) {
       ctx.ui.notify(`请修复审批配置并 /reload：${displayText(this.error)}`, "error");
       return;
     }
-    if (mode === "full" && !(await confirmFull(ctx))) return;
+    if (mode === "full" && mode !== this.mode && !(await confirmFull(ctx))) return;
     if (mode === "auto") {
       try { resolveReviewer(ctx, this.config, this.override()); }
       catch (error) {
@@ -146,14 +173,30 @@ export class ApprovalController {
         if (!ref || !(await this.configureReviewer(ref, ctx))) return;
       }
     }
+    if (this.inheritance.kind === "root") {
+      try {
+        const latest = await loadConfig();
+        latest.mode = mode;
+        await saveConfig(latest);
+        this.config = latest;
+      } catch (error) {
+        ctx.ui.notify(`权限模式保存失败：${displayText(error instanceof Error ? error.message : String(error))}`, "error");
+        return;
+      }
+    }
     this.invalidate();
     this.mode = mode;
     this.pi.appendEntry(STATE, { mode });
+    this.publishInheritance();
     status(ctx, mode);
     ctx.ui.notify(`Permissions: ${MODE_LABELS[mode]}`, "info");
   }
 
   private async configureReviewer(ref: string, ctx: ExtensionContext): Promise<boolean> {
+    if (this.inheritance.kind !== "root") {
+      ctx.ui.notify("子代理沿用父代理审批模型，不能修改用户审批配置。", "warning");
+      return false;
+    }
     if (!ctx.model || !validModelRef(ref)) {
       ctx.ui.notify("先选择主模型，再指定 provider/model-id。", "error");
       return false;
@@ -248,6 +291,20 @@ export class ApprovalController {
     }
     if (epoch !== this.epoch || ctx.signal?.aborted || snapshot !== JSON.stringify(event.input)) {
       return { block: true, reason: "审批期间模式、会话或操作参数已改变，请重新提交。" };
+    }
+    if (this.mode === "auto" && result.decision === "deny") {
+      const approved = await confirmDenied(ctx, event.toolName, boundary, snapshot, result.reason,
+        AbortSignal.any([this.lifetime.signal, ...(ctx.signal ? [ctx.signal] : [])]));
+      if (epoch !== this.epoch || ctx.signal?.aborted || snapshot !== JSON.stringify(event.input)) {
+        return { block: true, reason: "人工审批期间模式、会话或操作参数已改变，请重新提交。" };
+      }
+      if (approved !== undefined) {
+        result = {
+          ...result, decision: approved ? "allow" : "deny", reviewerDecision: "deny",
+          humanDecision: approved ? "allow" : "deny",
+          reason: `${result.reason}\n${approved ? "用户允许本次操作。" : "用户拒绝或取消本次操作。"}`,
+        };
+      }
     }
     if (result.usage) this.usages.set(event.toolCallId, result.usage);
     const record: ApprovalRecord = {
