@@ -8,7 +8,7 @@ import { DENIAL_GUIDANCE } from "./policy.ts";
 import { APPROVAL_INHERITANCE_ENV, captureApprovalInheritance, publishApprovalInheritance, restorePublishedApprovalInheritance, type ApprovalInheritance } from "./inheritance.ts";
 import { resolveReviewer, review } from "./reviewer.ts";
 import { isMode, MODES, MODE_LABELS, type ApprovalConfig, type ApprovalMode, type ApprovalRecord, type ReviewResult } from "./types.ts";
-import { confirmDenied, confirmFull, displayText, selectMode, status } from "./ui.ts";
+import { confirmDenied, confirmFull, displayText, reviewingStatus, selectMode, status } from "./ui.ts";
 
 const STATE = "pi-approve:state";
 const AUDIT = "pi-approve:review";
@@ -33,6 +33,7 @@ export class ApprovalController {
   private error = "审批插件尚未初始化。";
   private epoch = 0;
   private lifetime = new AbortController();
+  private stopReviewing?: () => void;
   private queue: Promise<unknown> = Promise.resolve();
   private records: ApprovalRecord[] = [];
   private usages = new Map<string, Usage>();
@@ -92,6 +93,8 @@ export class ApprovalController {
   }
 
   private invalidate() {
+    this.stopReviewing?.();
+    this.stopReviewing = undefined;
     this.epoch++;
     this.lifetime.abort();
     this.lifetime = new AbortController();
@@ -286,11 +289,13 @@ export class ApprovalController {
       result = { decision: !ctx.hasUI ? "unavailable" : approved ? "allow" : "deny", reason: ctx.hasUI ?
         (approved ? "用户允许本次操作。" : "用户拒绝、取消或操作参数过大。") : "当前模式无法显示人工审批，默认拦截。" };
     } else {
-      status(ctx, this.mode, true);
+      const stopReviewing = reviewingStatus(ctx, this.mode);
+      this.stopReviewing = stopReviewing;
       try {
         result = await review(event, ctx, this.config, boundary, tool, this.override(), this.lifetime.signal);
       } finally {
-        status(ctx, this.mode);
+        stopReviewing();
+        if (this.stopReviewing === stopReviewing) this.stopReviewing = undefined;
       }
     }
     if (epoch !== this.epoch || ctx.signal?.aborted || snapshot !== JSON.stringify(event.input)) {

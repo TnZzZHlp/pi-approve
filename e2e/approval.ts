@@ -33,6 +33,8 @@ const missing = async (path: string) => {
 };
 const bash = (path: string) => ({ name: "bash", arguments: { command: `printf approved > '${path}'` } });
 const confirms = (events: any[]) => events.filter(event => event.type === "extension_ui_request" && event.method === "confirm");
+const statuses = (events: any[]) => events.filter(event => event.type === "extension_ui_request" &&
+  event.method === "setStatus" && event.statusKey === "pi-approve").map(event => event.statusText);
 const nestedExtension = join(temp, "nested.ts");
 await writeFile(nestedExtension, `
 import { Type } from "typebox";
@@ -119,6 +121,7 @@ try {
   const autoFile = join(workspace, "auto");
   const autoRun = await pi.run([bash(autoFile)]);
   assert.equal(confirms(autoRun).length, 0);
+  assert.deepEqual(statuses(autoRun), ["⠋ Approve for me", "Approve for me"]);
   assert.equal(await readFile(autoFile, "utf8"), "approved");
   assert.equal(mock.reviews.at(-1)?.model, "reviewer");
   assert.equal(mock.reviews.at(-1)?.body.tools?.length ?? 0, 0);
@@ -162,7 +165,9 @@ try {
   for (let i = 0; i < 250 && mock.reviews.length === beforeCancelled; i++) await delay(20);
   assert(mock.reviews.length > beforeCancelled);
   await pi.command("/permissions ask");
-  await running;
+  const cancelledRun = await running;
+  assert.equal(statuses(cancelledRun)[0], "⠋ Approve for me");
+  assert.equal(statuses(cancelledRun).at(-1), "Ask for approval");
   assert(await missing(cancelledFile));
   await pi.command("/permissions auto");
 
@@ -281,6 +286,7 @@ try {
   assert(await missing(timeout));
   assert(timeoutRun.some(event => event.method === "notify" && event.message.includes("审批超时")));
   assert.equal(confirms(timeoutRun).length, 0);
+  assert.deepEqual(statuses(timeoutRun), ["⠋ Approve for me", "Approve for me"]);
 
   mock.setBehavior("allow");
   pi = await (async () => {

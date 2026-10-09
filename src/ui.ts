@@ -5,11 +5,29 @@ export function displayText(text: string) {
   return text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, char =>
     "\\u" + char.charCodeAt(0).toString(16).padStart(4, "0"));
 }
-export function status(ctx: ExtensionContext, mode: ApprovalMode, reviewing = false) {
-  const text = `${MODE_LABELS[mode]}${reviewing ? " | Reviewing..." : ""}`;
+const REVIEW_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+export function status(ctx: ExtensionContext, mode: ApprovalMode, frame = "") {
+  const text = frame ? `${frame} ${MODE_LABELS[mode]}` : MODE_LABELS[mode];
   ctx.ui.setStatus("pi-approve", ctx.mode === "tui"
     ? ctx.ui.theme.fg(mode === "full" ? "warning" : "accent", text)
     : text);
+}
+export function reviewingStatus(ctx: ExtensionContext, mode: ApprovalMode) {
+  let frame = 0;
+  let stopped = false;
+  status(ctx, mode, REVIEW_FRAMES[frame]);
+  const timer = ctx.hasUI && ctx.mode === "tui" ? setInterval(() => {
+    frame = (frame + 1) % REVIEW_FRAMES.length;
+    status(ctx, mode, REVIEW_FRAMES[frame]);
+  }, 80) : undefined;
+  timer?.unref();
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    if (timer) clearInterval(timer);
+    status(ctx, mode);
+  };
 }
 export async function selectMode(ctx: ExtensionContext, current: ApprovalMode) {
   if (!ctx.hasUI) return undefined;
